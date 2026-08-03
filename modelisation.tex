@@ -1,0 +1,225 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+
+\title{Dimensionnement PV + Batterie + Réseau\\
+\large Modélisation mathématique (MILP)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Contexte}
+
+On cherche à dimensionner, pour une maison individuelle, un système composé de panneaux
+photovoltaïques et d'une batterie stationnaire, connectés au réseau électrique, de façon à
+\textbf{minimiser le coût total annualisé} tout en \textbf{couvrant la demande électrique du
+foyer à chaque heure de l'année}. Le problème est résolu sur un horizon d'un an au pas
+horaire (8760 heures), sous la forme d'un programme linéaire en nombres entiers mixtes
+(MILP) : deux variables de dimensionnement sont entières (nombre de panneaux, nombre de
+modules de batterie), le reste du problème est linéaire continu.
+
+\section{Notations}
+
+\subsection{Ensemble}
+
+\[
+t \in \mathcal{T} = \{1, \dots, 8760\} \quad \text{(les heures de l'année)}
+\]
+
+\subsection{Paramètres}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbole & Description & Unité \\
+\midrule
+$D_t$ & Demande électrique du foyer à l'heure $t$ & kWh \\
+$\pi_t$ & Production PV d'\emph{un seul} panneau à l'heure $t$ & kWh \\
+$c^{ach}_t$ & Prix d'achat de l'électricité à l'heure $t$ & €/kWh \\
+$c^{vte}_t$ & Prix de vente du surplus à l'heure $t$ (constant) & €/kWh \\
+$c_{abo}$ & Abonnement annuel au réseau & € \\
+$c_{pv}$ & Coût d'un panneau installé & € \\
+$c^{kW}_{b}$, $c^{kWh}_{b}$ & Coût unitaire de puissance / capacité batterie & €/kW, €/kWh \\
+$\eta^{ch}$, $\eta^{dc}$ & Rendements de charge / décharge de la batterie & -- \\
+$e_{mod}$, $p_{mod}$ & Capacité / puissance d'un module de batterie standard & kWh, kW \\
+$r$ & Taux d'actualisation & -- \\
+$n^{pv}_{vie}$, $n^{b}_{vie}$ & Durée de vie (PV, batterie) & années \\
+$CRF_{pv}$, $CRF_{b}$ & Facteurs d'annualisation du capex (PV, batterie) & -- \\
+$\tau$ & Plafond imposé sur la part de la demande couverte par le réseau & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Le facteur d'annualisation du capital (\emph{Capital Recovery Factor}) répartit un
+investissement payé une seule fois sur sa durée de vie, à un taux d'actualisation $r$ :
+\begin{equation}
+CRF(r, n) = \frac{r(1+r)^n}{(1+r)^n - 1}
+\qquad CRF_{pv} = CRF(r, n^{pv}_{vie}), \quad CRF_{b} = CRF(r, n^{b}_{vie})
+\end{equation}
+
+\subsection{Variables de décision}
+
+\paragraph{Dimensionnement (entiers).}
+\begin{align*}
+n_{pv} &\in \mathbb{N} && \text{nombre de panneaux PV installés} \\
+n_{b} &\in \mathbb{N} && \text{nombre de modules de batterie installés}
+\end{align*}
+
+\paragraph{Dimensionnement dérivé (continu, lié aux entiers ci-dessus).}
+\begin{align*}
+P^{max}_{b} &\geq 0 && \text{puissance totale de la batterie (kW)} \\
+E^{max}_{b} &\geq 0 && \text{capacité totale de la batterie (kWh)}
+\end{align*}
+
+\paragraph{Flux horaires (continus, $\geq 0$, en kWh/h), pour tout $t \in \mathcal{T}$.}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbole & Nom dans le code & Description \\
+\midrule
+$a_t$ & \texttt{achat\_electricite} & Électricité achetée au réseau \\
+$v_t$ & \texttt{vente\_electricite} & Électricité vendue au réseau \\
+$f^{pv \to h}_t$ & \texttt{pv\_maison} & PV $\to$ maison (autoconsommation directe) \\
+$f^{pv \to b}_t$ & \texttt{pv\_batterie} & PV $\to$ batterie \\
+$f^{pv \to g}_t$ & \texttt{pv\_grid} & PV $\to$ réseau (vente de surplus) \\
+$f^{g \to b}_t$ & \texttt{grid\_batterie} & Réseau $\to$ batterie \\
+$f^{g \to h}_t$ & \texttt{grid\_maison} & Réseau $\to$ maison \\
+$f^{b \to h}_t$ & \texttt{batterie\_maison} & Batterie $\to$ maison \\
+$f^{b \to g}_t$ & \texttt{batterie\_grid} & Batterie $\to$ réseau \\
+$ch_t$ & \texttt{echarge} & Charge totale de la batterie \\
+$dc_t$ & \texttt{edecharge} & Décharge totale de la batterie \\
+$E_t$ & \texttt{estock\_batterie} & État de charge de la batterie \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Fonction objectif}
+
+Minimiser le coût total annuel = abonnement + capex annualisé (PV et batterie) + coût net
+d'électricité :
+\begin{equation}
+\min \; c_{abo} \cdot \delta
+\;+\; n_{pv}\, c_{pv}\, CRF_{pv}
+\;+\; \big(P^{max}_{b}\, c^{kW}_{b} + E^{max}_{b}\, c^{kWh}_{b}\big)\, CRF_{b}
+\;+\; \sum_{t \in \mathcal{T}} \Big( a_t \cdot c^{ach}_t - v_t \cdot c^{vte}_t \Big)
+\end{equation}
+où $\delta \in \{0,1\}$ vaut $1$ si le foyer reste connecté au réseau (option, voir
+section~\ref{sec:extensions}) ; par défaut $\delta = 1$ (fixe, connexion obligatoire).
+
+\section{Contraintes}
+
+\paragraph{Bilan de production PV.} La production totale (nombre de panneaux $\times$
+production unitaire) se répartit entre autoconsommation directe, charge de la batterie et
+injection réseau :
+\begin{equation}
+\pi_t \cdot n_{pv} = f^{pv\to h}_t + f^{pv\to b}_t + f^{pv\to g}_t \qquad \forall t
+\end{equation}
+
+\paragraph{Bilan des achats réseau.} L'électricité achetée sert à la maison et/ou à
+charger la batterie (le second terme disparaît si l'arbitrage batterie est désactivé, voir
+section~\ref{sec:extensions}) :
+\begin{equation}
+a_t = f^{g\to b}_t + f^{g\to h}_t \qquad \forall t
+\end{equation}
+
+\paragraph{Bilan des ventes réseau.} L'électricité vendue provient du PV et/ou de la
+batterie :
+\begin{equation}
+v_t = f^{b\to g}_t + f^{pv\to g}_t \qquad \forall t
+\end{equation}
+
+\paragraph{Bilan de charge/décharge de la batterie.}
+\begin{align}
+ch_t &= f^{g\to b}_t + f^{pv\to b}_t \qquad \forall t \\
+dc_t &= f^{b\to h}_t + f^{b\to g}_t \qquad \forall t
+\end{align}
+
+\paragraph{Dynamique de l'état de charge (cyclique).} Avec pertes de rendement, et
+bouclage de l'année sur elle-même (l'état de fin d'année alimente le début, plutôt qu'une
+valeur initiale figée arbitrairement à 0) :
+\begin{equation}
+E_t = E_{t-1} + ch_t \cdot \eta^{ch} - \frac{dc_t}{\eta^{dc}}
+\qquad \forall t, \quad \text{avec } E_0 \equiv E_{8760}
+\end{equation}
+
+\paragraph{Bornes de capacité et de puissance.}
+\begin{align}
+0 &\leq E_t \leq E^{max}_{b} \qquad \forall t \\
+ch_t &\leq P^{max}_{b} \qquad dc_t \leq P^{max}_{b} \qquad \forall t
+\end{align}
+
+\paragraph{Discrétisation de la batterie.} Capacité et puissance sont des multiples
+entiers d'un module standard, plutôt que des variables continues (réalisme commercial) :
+\begin{equation}
+E^{max}_{b} = n_{b} \cdot e_{mod} \qquad P^{max}_{b} = n_{b} \cdot p_{mod}
+\end{equation}
+
+\paragraph{Couverture de la demande.} Contrainte centrale du problème : la demande est
+satisfaite à chaque heure par le PV direct, le réseau ou la batterie :
+\begin{equation}
+D_t = f^{pv\to h}_t + f^{g\to h}_t + f^{b\to h}_t \qquad \forall t
+\end{equation}
+
+\paragraph{Plafond d'achat réseau (scénario de transition énergétique).} Optionnel : borne
+la part de la demande annuelle qui peut être couverte par des achats au réseau, maison et
+charge de la batterie confondues (peu importe la destination finale de l'énergie achetée) :
+\begin{equation}
+\sum_{t \in \mathcal{T}} a_t \;\leq\; \tau \cdot \sum_{t \in \mathcal{T}} D_t
+\end{equation}
+$\tau = 1$ correspond au marché libre (aucune contrainte), $\tau = 0$ à une autonomie
+totale imposée (aucun achat réseau, à aucune heure de l'année). Cette formulation ne peut
+pas être contournée par un chargement de la batterie depuis le réseau, contrairement à une
+contrainte qui ne porterait que sur l'autoconsommation directe.
+
+\subsection{Extensions optionnelles}
+\label{sec:extensions}
+
+\paragraph{Restriction anti-arbitrage (activée par défaut).} Pour éviter que le modèle
+n'exploite un écart entre un prix d'achat variable (marché spot, pouvant devenir négatif)
+et un prix de vente fixe garanti -- une stratégie plus proche du trading financier que de
+l'autoconsommation -- la charge de la batterie depuis le réseau peut être interdite :
+\begin{equation}
+f^{g\to b}_t = 0 \qquad \forall t
+\end{equation}
+Dans ce cas, le bilan de charge de la batterie se réduit à $ch_t = f^{pv\to b}_t$ : la
+batterie ne stocke que du surplus PV, revendable au réseau plus tard sans que ce soit du
+trading.
+
+\paragraph{Déconnexion du réseau (optionnelle).} Un binaire $\delta \in \{0,1\}$ peut
+rendre l'abonnement réseau optionnel :
+\begin{equation}
+a_t \leq M \cdot \delta \qquad v_t \leq M \cdot \delta \qquad \forall t
+\end{equation}
+où $M$ est une borne supérieure large sur les flux horaires réseau. Si $\delta = 0$, le
+foyer doit être strictement autosuffisant à chaque heure (pas seulement en moyenne
+annuelle) et ne paie pas l'abonnement.
+
+\section{Résumé des hypothèses clés}
+
+\begin{itemize}
+\item Année météo et profil de demande \textbf{représentatifs}, pas des mesures réelles
+du foyer.
+\item Le capex est \textbf{annualisé} via $CRF$ (taux d'actualisation $r$, durées de vie
+$n^{pv}_{vie}$, $n^{b}_{vie}$) plutôt que comparé tel quel à des économies sur un an.
+\item La batterie est \textbf{discrétisée} par modules entiers de taille fixe
+($e_{mod}$, $p_{mod}$), pas dimensionnée en continu.
+\item Le plafond $\tau$ porte sur le \textbf{total annuel} des achats réseau, pas sur
+chaque heure individuellement.
+\item Aucune borne de surface de toit ni de budget maximal n'est imposée sur $n_{pv}$ ou
+$n_{b}$.
+\item Les prix d'investissement (PV, batterie), le taux d'actualisation et les durées de
+vie sont incertains -- une analyse de sensibilité (hors modélisation, voir le notebook)
+teste la robustesse des conclusions à ces hypothèses.
+\end{itemize}
+
+\end{document}
